@@ -1048,7 +1048,8 @@ class VistapanelApi
 
         return true;
     }
-
+    
+    
     public function createDNSRecord($recordType, $domain, $data, $destination = null, $priority = null) {
         /*
         $recordType: Type of DNS record (e.g., "MX," "SPF," or "CNAME")
@@ -1103,6 +1104,205 @@ class VistapanelApi
 
         return true;
     }
+    
+    public function getDiskspaceDetails()
+{
+    $this->checkLogin();
+    
+    $token = $this->getToken();
+    $html = $this->simpleCurl(
+        $this->cpanelUrl . "/panel/indexpl.php?option=diskspace&ttt=" . $token,
+        false,
+        [],
+        false,
+        [$this->cookie]
+    );
+
+    $dom = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $dom->loadHTML($html);
+    libxml_clear_errors();
+
+    $xpath = new DOMXPath($dom);
+    $details = [];
+
+    // Parse tổng quát (total, used, free)
+    $summaryTable = $xpath->query('//table[@id="summary"]//tr');
+    foreach($summaryTable as $row) {
+        $cols = $row->getElementsByTagName('td');
+        if($cols->length >= 2) {
+            $key = trim($cols->item(0)->textContent);
+            $value = trim($cols->item(1)->textContent);
+            $details[str_replace(':', '', $key)] = $value;
+        }
+    }
+
+    $dirTable = $xpath->query('//table[contains(@class, "table-striped")]//tr');
+    $details['directories'] = [];
+    
+    foreach($dirTable as $index => $row) {
+        // Skip header row
+        if($index === 0) continue;
+        
+        $cols = $row->getElementsByTagName('td');
+        if($cols->length >= 3) {
+            $details['directories'][] = [
+                'path' => trim($cols->item(0)->textContent),
+                'size' => trim($cols->item(1)->textContent),
+                'files' => intval(trim($cols->item(2)->textContent))
+            ];
+        }
+    }
+
+    return $details;
+}
+  
+  public function getDetailedStats()
+{
+    $this->checkLogin();
+    $html = $this->simpleCurl(
+        $this->cpanelUrl . "/panel/indexpl.php",
+        false,
+        [],
+        false,
+        [$this->cookie]
+    );
+
+    $dom = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $dom->loadHTML($html);
+    libxml_clear_errors();
+
+    $xpath = new DOMXPath($dom);
+    $rows = $xpath->query("//table[@id='stats']/tbody/tr");
+    
+    $stats = [];
+    foreach ($rows as $row) {
+        $label = trim($xpath->query(".//td[contains(@class, 'stats_left')]", $row)->item(0)->textContent);
+        $value = trim($xpath->query(".//td[contains(@class, 'stats_right')]", $row)->item(0)->textContent);
+        
+        $label = rtrim($label, ':');
+        
+        $progressBar = $xpath->query(".//div[contains(@class, 'cpanel_widget_progress_bar_percent')]", $row)->item(0);
+        if ($progressBar) {
+            $percentage = trim($progressBar->textContent);
+            
+            if (preg_match('/(\d+)\s*\/\s*(\d+)/', $value, $matches)) {
+                $stats[$label] = [
+                    'used' => (int)$matches[1],
+                    'total' => (int)$matches[2],
+                    'percent' => $percentage != '' ? (float)$percentage : round(($matches[1] / $matches[2]) * 100, 1)
+                ];
+            } else {
+                $stats[$label] = $value;
+            }
+        } else {
+            // Parse special cases
+            switch ($label) {
+                case 'Inodes Used':
+                    if (preg_match('/(\d+)\s*%\s*\((\d+)\s*of\s*(\d+)\)/', $value, $matches)) {
+                        $stats[$label] = [
+                            'percent' => (float)$matches[1],
+                            'used' => (int)$matches[2],
+                            'total' => (int)$matches[3]
+                        ];
+                    } else {
+                        $stats[$label] = $value;
+                    }
+                    break;
+                    
+                case 'Disk Quota':
+                case 'Disk Space Used':
+                case 'Disk Free':
+                    $stats[$label] = $this->parseSize($value);
+                    break;
+                    
+                case 'Bandwidth':
+                case 'Bandwidth used':
+                case 'Bandwidth remaining':
+                    if (stripos($value, 'unlimited') !== false) {
+                        $stats[$label] = 'Unlimited';
+                    } else {
+                        $stats[$label] = $this->parseSize($value);
+                    }
+                    break;
+                    
+                case 'Daily Hits Used':
+                    if (preg_match('/(\d+)\s*%\s*\((\d+)\s*of\s*(\d+)\)/', $value, $matches)) {
+                        $stats[$label] = [
+                            'percent' => (float)$matches[1],
+                            'used' => (int)$matches[2],
+                            'total' => (int)$matches[3]
+                        ];
+                    }
+                    break;
+                    
+                default:
+                    $stats[$label] = $value;
+            }
+        }
+    }
+    
+    return $stats;
+}
+
+private function parseSize($size) 
+{
+    $size = trim($size);
+    if (preg_match('/^(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|B)?$/i', $size, $matches)) {
+        $value = (float)$matches[1];
+        $unit = isset($matches[2]) ? strtoupper($matches[2]) : 'B';
+        
+        return [
+            'value' => $value,
+            'unit' => $unit,
+            'bytes' => $this->convertToBytes($value, $unit)
+        ];
+    }
+    return $size;
+}
+
+private function convertToBytes($value, $unit) 
+{
+    switch (strtoupper($unit)) {
+        case 'TB':
+            return $value * pow(1024, 4);
+        case 'GB':
+            return $value * pow(1024, 3);
+        case 'MB':
+            return $value * pow(1024, 2);
+        case 'KB':
+            return $value * 1024;
+        default:
+            return $value;
+    }
+}
+
+public function getInodesInfo()
+{
+    $stats = $this->getDetailedStats();
+    return $stats['Inodes Used'] ?? null;
+}
+
+public function getDiskInfo()
+{
+    $stats = $this->getDetailedStats();
+    return [
+        'quota' => $stats['Disk Quota'] ?? null,
+        'used' => $stats['Disk Space Used'] ?? null,
+        'free' => $stats['Disk Free'] ?? null
+    ];
+}
+
+public function getBandwidthInfo()
+{
+    $stats = $this->getDetailedStats();
+    return [
+        'total' => $stats['Bandwidth'] ?? null,
+        'used' => $stats['Bandwidth used'] ?? null,
+        'remaining' => $stats['Bandwidth remaining'] ?? null
+    ];
+}
     
     public function logout()
     {
